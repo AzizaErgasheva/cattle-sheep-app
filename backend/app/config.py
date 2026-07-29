@@ -18,11 +18,15 @@ class Settings(BaseSettings):
     # from training (see the notebook's LABEL_MAP).
     class_names: tuple[str, str] = ("cow", "sheep")
 
-    cors_allow_origins: list[str] = ["*"]  # tighten to the deployed frontend origin in production
+    cors_allow_origins: str = "*"  # tighten to the deployed frontend origin in production
 
     # protected_namespaces=() silences pydantic's warning about fields named
     # `model_*` (model_config) colliding with its own namespace.
     model_config = SettingsConfigDict(env_prefix="APP_", protected_namespaces=())
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
 
 @lru_cache
