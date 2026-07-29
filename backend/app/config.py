@@ -18,7 +18,12 @@ class Settings(BaseSettings):
     # from training (see the notebook's LABEL_MAP).
     class_names: tuple[str, str] = ("cow", "sheep")
 
-    cors_allow_origins: str = "*"  # tighten to the deployed frontend origin in production
+    # Plain comma-separated string, NOT a JSON list. pydantic-settings parses
+    # list[str] fields from env vars as strict JSON, which is fragile through
+    # web-based env var editors (Render, Railway, etc. can mangle brackets/
+    # quotes) -- a comma-separated string has no such failure mode.
+    # e.g. "*" or "https://foo.vercel.app,https://bar.com"
+    cors_allow_origins: str = "*"
 
     # protected_namespaces=() silences pydantic's warning about fields named
     # `model_*` (model_config) colliding with its own namespace.
