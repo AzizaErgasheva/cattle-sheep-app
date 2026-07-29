@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-multipart==0.0.19
+pillow==11.0.0
+numpy==1.26.4
+tensorflow-cpu==2.17.0
+huggingface_hub==0.26.2
+
+# dev / test only
+pytest==8.3.4
+httpx==0.28.1
