@@ -346,7 +346,7 @@ Three parts: push code to GitHub, host model weights on Hugging Face Hub
 3. **Backend** (Render / Railway / Fly.io) — root directory `backend`,
    Docker environment, set:
    ```
-   APP_HF_REPO_ID=your-username/cow-sheep-classifier-models
+   APP_HF_REPO_ID=AzizaErgasheva/cow-sheep-classifier-models
    APP_CORS_ALLOW_ORIGINS=https://https://cattle-sheep-app.vercel.app/
    ```
    `APP_CORS_ALLOW_ORIGINS` is a **plain comma-separated string** (not a
