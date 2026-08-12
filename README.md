@@ -1,18 +1,275 @@
-# 🐄 Cow vs. Sheep Classifier — Full-Stack ML Portfolio App
+# 🐄 Cow vs. Sheep Classifier
 
-An end-to-end computer vision app: upload a photo, pick a trained model, get a
-prediction with confidence, see a **Grad-CAM** heatmap explaining *why* the
-model decided that, browse past predictions, and compare all four models'
-test-set performance on a live dashboard.
-
-Built on top of the models trained in the companion notebook (custom CNN →
-ResNet50 → MobileNetV2 → EfficientNetB0), this repo wraps them in a
-production-shaped service: a FastAPI backend in clean-architecture style and
-a React/TypeScript frontend, containerized and ready to deploy.
+A binary image classifier that tells cattle from sheep — trained on a cleaned
+subset of the Animals-10 dataset, benchmarked across four architectures, and
+shipped as a full-stack app with Grad-CAM explanations, prediction history,
+and a live model-comparison dashboard.
 
 ---
 
-## 🎥 Demo Video
+## Table of Contents
+
+1. [Problem](#1-problem)
+2. [Dataset](#2-dataset)
+3. [Methodology](#3-methodology)
+4. [Architecture](#4-architecture)
+5. [Training](#5-training)
+6. [Results](#6-results)
+7. [Error Analysis](#7-error-analysis)
+8. [Demo](#8-demo)
+9. [Installation](#9-installation)
+10. [Future Improvements](#10-future-improvements)
+
+---
+
+## 1. Problem
+
+Binary image classification: given a photo, decide whether it shows a **cow**
+or a **sheep**. Framed intentionally narrow — two visually similar livestock
+classes — to make the project a clean testbed for comparing a from-scratch
+CNN against transfer learning, and for building real interpretability
+(Grad-CAM) and evaluation (confusion matrices, McNemar's test) around the
+result, rather than just reporting a single accuracy number.
+
+The end goal is a working end-to-end system: notebook → trained model →
+served API → UI a non-technical person could actually use.
+
+---
+
+## 2. Dataset
+
+**Source:** [Animals-10](https://www.kaggle.com/datasets/alessiocorrado99/animals10)
+(Kaggle, Alessio Corradi) — a 10-class animal image dataset. Only two classes
+were used: `mucca` (cow) and `pecora` (sheep).
+
+| Stage | Cow | Sheep | Total |
+|---|---|---|---|
+| Raw (Animals-10 subset) | 1,866 | 1,820 | 3,686 |
+| After cleaning | 1,760 | 1,698 | 3,458 |
+
+### AI-assisted cleaning
+
+Animals-10 is known to contain mislabelled images — the cow folder includes
+goats and deer, the sheep folder includes goats, llamas, and other animals.
+Training on these corrupts both the learned features and the evaluation
+metrics, so every image was passed through a pretrained MobileNetV2
+(ImageNet weights) and checked for whether any of its **top-10 predicted
+classes** matched the livestock category expected for that folder:
+
+- **Cow-valid ImageNet classes:** `ox`, `water_buffalo`, `bison`
+- **Sheep-valid ImageNet classes:** `ram`, `bighorn`, `ibex`, `llama`
+
+Images with no match were flagged, visually spot-checked, and removed —
+**106 images (5.7%)** dropped from the cow folder, **122 (6.7%)** from the
+sheep folder.
+
+### Split
+
+Stratified 70 / 15 / 15 split (`sklearn.train_test_split`, seed 42):
+
+| Split | Cow | Sheep | Total |
+|---|---|---|---|
+| Train | 1,232 | 1,188 | 2,420 |
+| Validation | 264 | 255 | 519 |
+| Test | 264 | 255 | 519 |
+
+---
+
+## 3. Methodology
+
+- **Preprocessing:** decode → resize to 224×224 → scale to `[0, 1]`. Fed
+  through a `tf.data` pipeline (`AUTOTUNE` parallel loading + prefetch).
+- **Augmentation** (training split only): random horizontal flip, brightness
+  (±0.15), contrast (0.8–1.2×), hue (±0.05), saturation (0.8–1.2×), then
+  clipped back to `[0, 1]`.
+- **Four models trained and compared** on the identical data pipeline:
+  a custom CNN trained from scratch (performance floor), plus three
+  ImageNet-pretrained backbones fine-tuned for this task — **ResNet50**,
+  **MobileNetV2**, **EfficientNetB0**.
+- **Output:** single sigmoid unit, binary cross-entropy loss, threshold 0.5.
+- **Evaluation:** held-out test set, classification report, confusion
+  matrices, and a **McNemar's test** to check whether the best transfer model
+  is *statistically* better than the CNN baseline — not just numerically
+  higher.
+- Reproducibility: global seed 42 (`random`, `numpy`, `tensorflow`) throughout.
+- Trained on Kaggle, 2× Tesla T4 GPU, TensorFlow 2.20.
+
+---
+
+## 4. Architecture
+
+### Model architecture
+
+**Custom CNN** (baseline, trained from scratch):
+```
+Input(224,224,3)
+→ [Conv2D(32→64→128→256, 3×3, no bias) → BatchNorm → ReLU → MaxPool] × 4
+→ GlobalAveragePooling2D
+→ Dense(256, relu) → Dropout(0.5)
+→ Dense(1, sigmoid)
+```
+Uses BatchNorm for stable training and a cosine-decay learning-rate schedule
+(instead of a fixed LR) to avoid the aggressive early decay that caused the
+model to stall in earlier iterations of this project.
+
+**Transfer-learning models** (ResNet50 / MobileNetV2 / EfficientNetB0):
+```
+Input(224,224,3)
+→ backbone-specific preprocess_input (re-scales 0–1 input to what the backbone expects)
+→ pretrained backbone (ImageNet weights)
+→ GlobalAveragePooling2D → Dropout(0.3)
+→ Dense(1, sigmoid)
+```
+
+### App / system architecture
+
+```
+[ React frontend ]  --HTTP-->  [ FastAPI backend ]  --loads-->  [ .keras models ]
+```
+
+The backend follows **clean architecture** — business logic (what a
+prediction *is*, how to run inference) is isolated from frameworks (FastAPI,
+Keras, React), so any layer can be swapped without touching the others.
+
+| Layer | Responsibility | Depends on |
+|---|---|---|
+| **Domain** | `Prediction`, `ImageInput`, `ModelSummary`, `HistoryEntry` entities; `ClassifierPort` / `ExplainerPort` / `ModelRegistryPort` interfaces | Nothing — pure Python |
+| **Application** | Use cases: `PredictImageUseCase`, `ExplainPredictionUseCase`, history use cases, `ListModelsUseCase` | Domain interfaces only |
+| **Infrastructure** | `KerasModelAdapter` (loads a `.keras` model, predicts + Grad-CAM), `ModelRegistry` (auto-discovers models, merges metadata), `SqliteHistoryRepository`, image utils | Domain interfaces (implements them) + TensorFlow/Keras/Pillow |
+| **API** | FastAPI routes, Pydantic schemas, DI wiring, error → HTTP translation | Application layer only |
+
+**Grad-CAM implementation note:** the last `Conv2D` layer is located
+automatically. For flat models (custom CNN) a single graph runs forward +
+backward. For models wrapping a nested backbone, Keras can't trace a path
+from the outer model's inputs directly into the backbone's internal tensors
+— so a self-contained graph is built from the backbone's own input/output,
+and the classification head is replayed manually inside the same gradient
+tape.
+
+```
+backend/app/{domain, application, infrastructure, api}/
+frontend/src/{api, components}/
+docker-compose.yml
+```
+
+**API:**
+
+| Endpoint | Method | Body | Response |
+|---|---|---|---|
+| `/health` | GET | — | `{"status": "ok", "model": "resnet50"}` |
+| `/models` | GET | — | All available models + metrics |
+| `/predict` | POST | multipart `file` + optional `model_name` | `{label, confidence, probabilities, model_name}` |
+| `/predict/explain` | POST | multipart `file` + optional `model_name` | Grad-CAM overlay PNG |
+| `/history` | GET / DELETE | `?limit=` | Recent predictions / clear |
+
+---
+
+## 5. Training
+
+| Model | Optimizer / LR | Epochs (max) | Callbacks |
+|---|---|---|---|
+| Custom CNN | Adam, cosine decay from 1e-3 | 40 | EarlyStopping (patience 8, monitor `val_loss`) |
+| ResNet50 / MobileNetV2 / EfficientNetB0 — **Phase 1** (frozen backbone) | Adam, 1e-3 | 10 | EarlyStopping (patience 4) + ReduceLROnPlateau (factor 0.5, patience 2) |
+| Same — **Phase 2** (fine-tune) | Adam, 1e-5 | 15 | EarlyStopping (patience 6) |
+
+Phase 2 unfreezes the **top 30 layers** of each backbone, letting it adapt
+generic ImageNet features to the specific visual cues that separate cattle
+from sheep, while keeping the rest of the network frozen.
+
+**What actually happened during training:**
+- Custom CNN trained the full 40-epoch budget until early stopping at
+  **epoch 27**, restoring weights from epoch 19 (best `val_accuracy`: 86.3%).
+- ResNet50 needed both phases to converge, reaching **98.65% val accuracy**
+  by phase 2 epoch 11.
+- MobileNetV2 and EfficientNetB0 converged unusually fast — both phases
+  stopped within a handful of epochs (best weights from epoch 1 in each
+  phase), landing at **96.9%** and **96.5% val accuracy** respectively.
+
+---
+
+## 6. Results
+
+Test set (519 held-out images, never seen during training or validation):
+
+| Model | Accuracy | Precision | Recall | F1 |
+|---|---|---|---|---|
+| **ResNet50** ★ best | 97.69% | 97.69% | 97.69% | 97.69% |
+| EfficientNetB0 | 96.72% | 96.73% | 96.72% | 96.72% |
+| MobileNetV2 | 96.34% | 96.42% | 96.34% | 96.34% |
+| Custom CNN | 82.27% | 83.10% | 82.27% | 82.19% |
+
+### Is the gap real, or just noise?
+
+A **McNemar's test** compared the custom CNN against ResNet50 (the best
+transfer model) on the same test images:
+
+| | CNN correct | CNN wrong |
+|---|---|---|
+| **Transfer correct** | 422 | 85 |
+| **Transfer wrong** | 5 | 7 |
+
+McNemar statistic **69.34**, p-value **< 0.0001** — the difference is highly
+statistically significant, not a fluke of this particular test split.
+
+ResNet50 is the most accurate but also the heaviest to serve. If cold-start
+latency matters on a free hosting tier, MobileNetV2 is a reasonable
+trade-off — 96.3% vs. 97.7% accuracy for a much smaller, faster container.
+
+---
+
+## 7. Error Analysis
+
+ResNet50 (the deployed default) misclassifies **12 of 519 test images
+(2.3%)**. Manually inspecting those errors surfaces two recurring patterns:
+
+- **White / pale, fluffy-coated cattle** (especially calves) get predicted
+  as sheep — a close-up of a fluffy white calf face was misclassified with
+  100% confidence as sheep, and a pen of woolly-looking white cows scored
+  0.54 toward sheep. The coat texture visually overlaps with wool.
+- **Dark-faced, patterned, or horned sheep** (and a few goat-like animals
+  that survived the automated cleaning pass) get predicted as cow — a group
+  of black-and-white horned sheep was misclassified as cow at 0.98
+  confidence.
+- A smaller number of errors come from **group shots and small/distant
+  animals** — e.g. a person herding a flock in the far background of the
+  frame, where the animals occupy a small fraction of the image.
+
+**Grad-CAM** overlays confirm the model is basing its decision on the
+animal's **body and coat texture**, not background context (grass, fences,
+sky) — a good sign that it learned a legitimate visual signal rather than a
+shortcut. Comparing the two models qualitatively: ResNet50's activation
+heatmaps are tightly focused on the animal's torso, while the custom CNN's
+are much more diffuse and weaker — consistent with its lower accuracy and
+suggesting it hasn't learned as clean a notion of "what part of the image
+matters."
+
+**Acknowledged limitations from the training process itself:**
+- Dataset cleaning is conservative — it keeps borderline cases rather than
+  aggressively filtering, so some mislabelled or ambiguous images likely
+  remain.
+- Fine-tuning only unfreezes the top 30 backbone layers; full fine-tuning
+  with a learning-rate warm-up could push accuracy further.
+- No test-time augmentation (TTA) was used — ensembling predictions over
+  augmented views typically adds another ~0.5–1 point of accuracy.
+
+---
+
+## 8. Demo
+
+End-to-end app around the four trained models: pick a model, upload a photo,
+get a prediction with confidence, see the Grad-CAM overlay explaining the
+decision, browse prediction history, and view the live model-comparison
+dashboard above, rendered directly from the app's `/models` endpoint.
+
+| Feature | Where |
+|---|---|
+| Model selector (ResNet50 / MobileNetV2 / EfficientNetB0 / Custom CNN) | Classify tab |
+| Prediction + confidence + per-class probabilities | Classify tab |
+| Grad-CAM explanation, generated on demand ("why this prediction?") | Classify tab |
+| Prediction history (SQLite-backed, persists across restarts) | History tab |
+| Live analytics dashboard (accuracy / precision / recall / F1 per model) | Dashboard tab |
+
+### 🎥 Demo Video
 
 > _Video coming soon — add your walkthrough here._
 >
@@ -25,152 +282,11 @@ a React/TypeScript frontend, containerized and ready to deploy.
 
 ---
 
-## Table of Contents
+## 9. Installation
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Model Comparison](#model-comparison)
-- [API Reference](#api-reference)
-- [Getting Started](#getting-started)
-  - [Quickest path: Docker](#quickest-path-docker)
-  - [Manual local dev](#manual-local-dev)
-- [Testing](#testing)
-- [Deployment](#deployment)
-- [What's Verified](#whats-verified-vs-what-you-still-need-to-do)
-- [Roadmap](#roadmap--what-id-improve-next)
-
----
-
-## Features
-
-| Feature | Where |
-|---|---|
-| Model selector (ResNet50 / MobileNetV2 / EfficientNetB0 / Custom CNN) | Classify tab |
-| Prediction + confidence + per-class probabilities | Classify tab |
-| Grad-CAM explanation, generated on demand ("why this prediction?") | Classify tab |
-| Prediction history (SQLite-backed, persists across restarts) | History tab |
-| Live analytics dashboard (accuracy / precision / recall / F1 per model) | Dashboard tab |
-
----
-
-## Architecture
-
-```
-[ React frontend ]  --HTTP-->  [ FastAPI backend ]  --loads-->  [ .keras models ]
-```
-
-Two deployable units: a static frontend and a Python inference API, in one
-monorepo. The backend follows **clean architecture** — business logic (what a
-prediction *is*, how to run inference) is isolated from frameworks (FastAPI,
-Keras, React), so any layer can be swapped without touching the others.
-
-| Layer | Responsibility | Depends on |
-|---|---|---|
-| **Domain** | `Prediction`, `ImageInput`, `ModelSummary`, `HistoryEntry` entities; `ClassifierPort` / `ExplainerPort` / `ModelRegistryPort` interfaces | Nothing — pure Python |
-| **Application** | Use cases: `PredictImageUseCase`, `ExplainPredictionUseCase`, history use cases, `ListModelsUseCase` | Domain interfaces only |
-| **Infrastructure** | `KerasModelAdapter` (loads a `.keras` model, predicts + Grad-CAM), `ModelRegistry` (auto-discovers models, merges metadata), `SqliteHistoryRepository`, image utils | Domain interfaces (implements them) + TensorFlow/Keras/Pillow |
-| **API** | FastAPI routes, Pydantic schemas, DI wiring, error → HTTP translation | Application layer only |
-
-Splitting Application from Infrastructure means every use case is
-unit-tested against a **fake** registry/classifier — no TensorFlow, no GPU,
-fast CI.
-
-### Why one `KerasModelAdapter` per model, not two separate classes
-
-`ModelHandle` combines the classifier and explainer interfaces on one object,
-so a model's weights are loaded once and shared between `/predict` and
-`/predict/explain` for that model, instead of two separate copies of the same
-network living in memory.
-
-### Grad-CAM, briefly
-
-The last `Conv2D` layer is located automatically. For flat models (custom
-CNN) a single graph runs a forward + backward pass. For models wrapping a
-nested backbone (ResNet50 / MobileNetV2 / EfficientNetB0), a self-contained
-graph is built from the backbone's own input/output and the classification
-head is replayed manually inside the same gradient tape — necessary because
-Keras won't let a single `Model` span into a nested submodel's internals
-directly.
-
----
-
-## Tech Stack
-
-**Backend:** Python 3.11, FastAPI, Pydantic v2, TensorFlow (CPU), Pillow,
-SQLite (stdlib `sqlite3`), pytest, Docker.
-
-**Frontend:** React 18, Vite, TypeScript (strict), Tailwind CSS, Recharts.
-
----
-
-## Project Structure
-
-```
-.
-├── backend/
-│   ├── app/
-│   │   ├── domain/          entities.py, ports.py, exceptions.py — zero framework imports
-│   │   ├── application/      predict_use_case.py, explain_use_case.py, history_use_cases.py, list_models_use_case.py
-│   │   ├── infrastructure/   keras_model_adapter.py, model_registry.py, history_repository.py, image_utils.py
-│   │   ├── api/
-│   │   │   ├── routes/        predict.py, explain.py, health.py, models.py, history.py
-│   │   │   ├── schemas.py     Pydantic request/response models
-│   │   │   ├── dependencies.py DI providers
-│   │   │   └── main.py         FastAPI app + CORS + router wiring
-│   │   └── config.py          Settings (APP_* env vars)
-│   ├── models/                 metadata.json (+ your .keras files, gitignored)
-│   ├── scripts/download_models.py   pulls weights from Hugging Face Hub at container start
-│   ├── tests/unit/ + tests/integration/
-│   ├── entrypoint.sh, Dockerfile, requirements.txt
-│   └── data/                    SQLite history.db lives here at runtime
-├── frontend/
-│   ├── src/
-│   │   ├── api/client.ts        typed fetch wrapper, mirrors backend schemas
-│   │   ├── components/          UploadDropzone, ModelSelector, PredictionCard, GradCamOverlay, HistoryPanel, Dashboard
-│   │   ├── App.tsx               tab navigation: Classify / History / Dashboard
-│   │   └── main.tsx, index.css
-│   ├── Dockerfile, package.json, vite.config.ts, tailwind.config.js
-├── docker-compose.yml
-└── README.md
-```
-
----
-
-## Model Comparison
-
-Test-set results from the training notebook (`backend/models/metadata.json`):
-
-| Model | Accuracy | Precision | Recall | F1 |
-|---|---|---|---|---|
-| **ResNet50** ★ best | 97.69% | 97.69% | 97.69% | 97.69% |
-| EfficientNetB0 | 96.72% | 96.73% | 96.72% | 96.72% |
-| MobileNetV2 | 96.34% | 96.42% | 96.34% | 96.34% |
-| Custom CNN | 82.27% | 83.10% | 82.27% | 82.19% |
-
-ResNet50 is the most accurate but also the heaviest to serve. If cold-start
-latency matters on a free hosting tier, MobileNetV2 is a reasonable
-trade — 96.3% vs. 97.7% accuracy for a much smaller, faster container.
-
----
-
-## API Reference
-
-| Endpoint | Method | Body | Response |
-|---|---|---|---|
-| `/health` | GET | — | `{"status": "ok", "model": "resnet50"}` |
-| `/models` | GET | — | All available models + metrics, for the selector/dashboard |
-| `/predict` | POST | multipart `file` + optional `model_name` | `{label, confidence, probabilities, model_name}` — also recorded to history |
-| `/predict/explain` | POST | multipart `file` + optional `model_name` | Grad-CAM overlay PNG, prediction fields in `X-Predicted-Label` / `X-Confidence` / `X-Model-Name` headers |
-| `/history` | GET | `?limit=` (default 20, max 200) | Recent predictions, newest first |
-| `/history` | DELETE | — | Clears history, `204 No Content` |
-
-Interactive docs at `http://localhost:8000/docs` once the backend is running.
-
----
-
-## Getting Started
+**Tech stack:** Python 3.11, FastAPI, Pydantic v2, TensorFlow (CPU), Pillow,
+SQLite (stdlib), pytest · React 18, Vite, TypeScript (strict), Tailwind CSS,
+Recharts.
 
 ### Quickest path: Docker
 
@@ -184,7 +300,7 @@ Interactive docs at `http://localhost:8000/docs` once the backend is running.
    backend/models/custom_cnn.keras
    ```
    `backend/models/metadata.json` is already included, pre-filled with the
-   notebook's actual results.
+   results above.
 
 2. Run both services:
    ```bash
@@ -211,126 +327,54 @@ npm run dev
 
 Frontend dev server: `http://localhost:5173`.
 
----
-
-## Testing
+### Testing
 
 ```bash
-cd backend && pytest -v
+cd backend && pytest -v      # 25/25 — TF-free, uses fakes for the model registry
+cd frontend && npm run build # type-checks (tsc -b) then builds to dist/
 ```
 
-Domain/application layers are tested directly against fakes; API routes via
-FastAPI's `dependency_overrides`; the model registry's discovery and
-metadata-merging logic against real temp files with no actual model loading.
-TensorFlow is only imported when a `ModelHandle` actually loads a real
-`.keras` file, i.e. on a genuine `/predict` call — so the whole suite runs
-fast without TensorFlow installed.
-
-```bash
-cd frontend && npm run build   # type-checks (tsc -b) then builds to dist/
-```
-
----
-
-## Deployment
+### Deployment
 
 Three parts: push code to GitHub, host model weights on Hugging Face Hub
-(they're too large for git), deploy the backend, deploy the frontend.
+(too large for git), deploy the backend, deploy the frontend.
 
-### 1. Push to GitHub
-
-```bash
-git add .
-git status   # confirm no .keras files, node_modules, or .venv are listed
-git commit -m "Cow vs sheep classifier full-stack app"
-git push
-```
-
-### 2. Host model weights on Hugging Face Hub
-
-`.keras` files are gitignored on purpose — `resnet50.keras` alone is ~200MB,
-over GitHub's 100MB hard file limit.
-
-1. Rename local files if needed so they match what the backend expects:
-   `resnet50.keras`, `mobilenet.keras`, `efficientnet.keras`,
-   `custom_cnn.keras`, `metadata.json`.
-2. Create a free **Model** repo at [huggingface.co/new](https://huggingface.co/new),
-   e.g. `your-username/cow-sheep-classifier-models`.
-3. Upload the 5 files via the repo's "Files" → "Add file" → "Upload files".
-
-### 3. Deploy the backend (Render, Railway, or Fly.io)
-
-1. New → Web Service → connect your repo.
-2. **Root directory:** `backend` · **Environment:** Docker.
-3. Environment variables:
+1. **Push to GitHub** — `.keras` files are gitignored (`resnet50.keras`
+   alone is ~200MB, over GitHub's 100MB limit).
+2. **Host weights on [Hugging Face Hub](https://huggingface.co/new)** —
+   create a free Model repo, upload the 4 `.keras` files + `metadata.json`.
+3. **Backend** (Render / Railway / Fly.io) — root directory `backend`,
+   Docker environment, set:
    ```
    APP_HF_REPO_ID=your-username/cow-sheep-classifier-models
-   APP_CORS_ALLOW_ORIGINS=https://your-frontend-domain.vercel.app
+   APP_CORS_ALLOW_ORIGINS=https://https://cattle-sheep-app.vercel.app/
    ```
-   `APP_CORS_ALLOW_ORIGINS` is a **plain comma-separated string** (e.g.
-   `https://foo.com,https://bar.com`), *not* a JSON array — brackets/quotes
-   will break it.
-4. Deploy. First boot re-downloads ~200MB of models inside `entrypoint.sh` —
-   check logs for `[download_models]` lines. If the HF repo is private, also
-   set `HF_TOKEN`.
-5. Confirm it's live at `https://your-backend-url/docs`.
+   `APP_CORS_ALLOW_ORIGINS` is a **plain comma-separated string** (not a
+   JSON array — brackets/quotes will break it). `entrypoint.sh` downloads
+   any missing model from HF Hub before starting `uvicorn`; set `HF_TOKEN`
+   too if the HF repo is private.
+4. **Frontend** (Vercel) — root directory `frontend`, build command
+   `npm run build`, build-time env var `VITE_API_URL=https://cattle-sheep-app.onrender.com`.
+5. **Close the loop** — update the backend's `APP_CORS_ALLOW_ORIGINS` to the
+   real frontend URL and redeploy, or every `/predict` call will fail with a
+   CORS error in the browser console.
 
-### 4. Deploy the frontend (Vercel)
-
-1. New Project → import the same repo. **Root directory:** `frontend`.
-2. **Build command:** `npm run build` (auto-detected).
-3. Environment variable (build-time — Vite bakes it in at build, not runtime):
-   ```
-   VITE_API_URL=https://your-backend-url.onrender.com
-   ```
-4. Deploy → you'll get a URL like `https://cow-sheep-app.vercel.app`.
-
-### 5. Close the loop: fix CORS
-
-Update the backend's `APP_CORS_ALLOW_ORIGINS` to the real frontend URL and
-redeploy. Without this, the frontend loads but every `/predict` call fails
-with a CORS error in the browser console.
-
-### Sanity check
-
-Open the live frontend, upload a cow or sheep photo, confirm a prediction
-comes back, and check the History and Dashboard tabs load too.
-
-### Free-tier notes
-
-- Render's free web services sleep after inactivity and take ~30–60s to wake
-  — the first prediction after idle time will be slow, not broken.
-- Render's free tier has an ephemeral filesystem, so every restart re-runs
-  `entrypoint.sh` and re-downloads all ~260MB of models. If that becomes a
-  problem, look into a persistent disk add-on.
+Render's free tier sleeps after inactivity (~30–60s cold start) and has an
+ephemeral filesystem, so every restart re-downloads all ~260MB of models —
+a persistent disk add-on avoids that if it becomes a problem.
 
 ---
 
-## What's Verified vs. What You Still Need to Do
+## 10. Future Improvements
 
-**Verified:**
-- Backend: test suite passes, OpenAPI schema builds cleanly across all
-  endpoint groups, every file byte-compiles, the model registry's discovery
-  and metadata-merging logic is tested with real temp files, adapters fail
-  gracefully (no TensorFlow import) when a model file is missing.
-- Frontend: `npm run build` (type-check + Vite build) succeeds with zero
-  TypeScript errors, dev server boots cleanly.
-
-**Not yet verified (needs real model files):**
-- A real end-to-end request through `/predict` and `/predict/explain`
-  against actual `.keras` weights. Once your models are in place, hit
-  `/docs` (or the Classify tab) to try a real image.
-- Preprocessing is inferred by filename: `resnet50`, `mobilenet`, and
-  `efficientnet` get the matching `preprocess_input`; anything else (like
-  `custom_cnn`) is treated as a flat model with no preprocessing. Rename
-  files to match, or the wrong preprocessing will get applied silently.
-
----
-
-## Roadmap / What I'd Improve Next
-
-- Multi-class support beyond cow/sheep.
-- Active learning loop on misclassified images from the history log.
-- k-fold cross-validation results alongside the single test-set split.
-- Frontend component tests (Vitest + React Testing Library) for
-  `PredictionCard` and friends.
+- **Manual audit pass** on the cleaned dataset — the automated MobileNetV2
+  filter is conservative and likely keeps some borderline/mislabelled images.
+- **Full backbone fine-tuning** with a learning-rate warm-up, instead of only
+  unfreezing the top 30 layers.
+- **Test-time augmentation (TTA)** — ensembling predictions over augmented
+  views, ~0.5–1pp expected gain.
+- **Multi-class extension** beyond cow/sheep (goats, horses, etc.).
+- **Active learning loop** on misclassified images surfaced by the app's own
+  prediction history.
+- **k-fold cross-validation** for a more robust estimate than a single split.
+- **Frontend component tests** (Vitest + React Testing Library).
