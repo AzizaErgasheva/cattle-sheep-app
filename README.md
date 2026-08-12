@@ -1,11 +1,3 @@
-
-
-https://github.com/user-attachments/assets/7f05ec15-b900-4284-8cac-19ce9f41bc96
-
-
-
-
-
 # 🐄 Cow vs. Sheep Classifier
 
 A binary image classifier that tells cattle from sheep — trained on a cleaned
