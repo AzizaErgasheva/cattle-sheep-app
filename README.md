@@ -1,3 +1,5 @@
+
+
 # 🐄 Cow vs. Sheep Classifier
 
 A binary image classifier that tells cattle from sheep — trained on a cleaned
@@ -271,14 +273,6 @@ dashboard above, rendered directly from the app's `/models` endpoint.
 
 ### 🎥 Demo Video
 
-> _Video coming soon — add your walkthrough here._
->
-> To embed it: drag and drop the video file directly into this README on
-> GitHub.com (in the web editor) — GitHub will upload it and auto-insert the
-> correct link. Or paste a YouTube link below and it'll render as a clickable
-> thumbnail:
->
-> [![Demo video](https://img.shields.io/badge/▶-Watch_the_demo-22d3ee?style=for-the-badge)](#)
 
 ---
 
