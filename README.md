@@ -1,5 +1,11 @@
 
 
+https://github.com/user-attachments/assets/7f05ec15-b900-4284-8cac-19ce9f41bc96
+
+
+
+
+
 # 🐄 Cow vs. Sheep Classifier
 
 A binary image classifier that tells cattle from sheep — trained on a cleaned
@@ -272,6 +278,8 @@ dashboard above, rendered directly from the app's `/models` endpoint.
 | Live analytics dashboard (accuracy / precision / recall / F1 per model) | Dashboard tab |
 
 ### 🎥 Demo Video
+
+https://github.com/user-attachments/assets/58cb07ff-fd61-4a29-b345-7092e9d81535
 
 
 ---
