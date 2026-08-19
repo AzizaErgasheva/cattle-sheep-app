@@ -5,6 +5,8 @@ subset of the Animals-10 dataset, benchmarked across four architectures, and
 shipped as a full-stack app with Grad-CAM explanations, prediction history,
 and a live model-comparison dashboard.
 
+> [Kaggle notebook](https://www.kaggle.com/code/azizaergasheva/cattle-vs-sheep-image-classification-v3)
+
 ---
 
 ## Table of Contents
